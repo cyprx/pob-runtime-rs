@@ -1,0 +1,385 @@
+use arboard::Clipboard;
+use std::{
+    collections::HashSet,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
+
+use mlua::prelude::*;
+
+use crate::graphics::{CursorPos, DrawQueue, TextQueue};
+
+pub struct LuaHost {
+    pub lua: Lua,
+    pub main_object: Arc<Mutex<Option<LuaRegistryKey>>>,
+    pub root_dir: PathBuf,
+}
+
+impl LuaHost {
+    pub fn new(
+        root_dir: PathBuf,
+        draw_queue: DrawQueue,
+        text_queue: TextQueue,
+        cursor_pos: CursorPos,
+        pressed_keys: Arc<Mutex<HashSet<String>>>,
+    ) -> LuaResult<Self> {
+        let lua = unsafe { Lua::unsafe_new() };
+        let main_object: Arc<Mutex<Option<LuaRegistryKey>>> = Arc::new(Mutex::new(None));
+        let mo = main_object.clone();
+        let clipboard = Arc::new(Mutex::new(Clipboard::new().unwrap()));
+
+        let start_time = std::time::Instant::now();
+
+        {
+            let g = lua.globals();
+            let script_path = Arc::new(root_dir.join("PathOfBuilding/src"));
+            let runtime_path = root_dir.join("PathOfBuilding/runtime/lua");
+
+            g.set(
+                "GetTime",
+                lua.create_function(move |_, ()| Ok(start_time.elapsed().as_millis() as u64))?,
+            )?;
+
+            g.set(
+                "SetWindowTitle",
+                lua.create_function(|_, _: String| Ok(()))?,
+            )?;
+
+            g.set("ConExecute", lua.create_function(|_, _: String| Ok(()))?)?;
+
+            g.set("ConClear", lua.create_function(|_, ()| Ok(()))?)?;
+
+            g.set(
+                "ConPrintf",
+                lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+            )?;
+
+            g.set(
+                "SetMainObject",
+                lua.create_function(move |lua, obj: LuaValue| {
+                    *mo.lock().unwrap() = Some(lua.create_registry_value(obj)?);
+                    Ok(())
+                })?,
+            )?;
+
+            {
+                let package: LuaTable = g.get("package")?;
+                let current_path: String = package.get("path")?;
+                let new_path = format!(
+                    "{};{}/?.lua;{}/?/init.lua",
+                    current_path,
+                    runtime_path.display(),
+                    runtime_path.display(),
+                );
+                package.set("path", new_path)?;
+            }
+
+            g.set(
+                "RenderInit",
+                lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+            )?;
+
+            g.set(
+                "PCall",
+                lua.create_function(|lua, (func, args): (LuaFunction, LuaMultiValue)| {
+                    match func.call::<LuaMultiValue, LuaMultiValue>(args) {
+                        Ok(results) => {
+                            let mut out = vec![LuaValue::Nil];
+                            out.extend(results);
+                            Ok(LuaMultiValue::from_vec(out))
+                        }
+                        Err(e) => Ok(LuaMultiValue::from_vec(vec![LuaValue::String(
+                            lua.create_string(e.to_string().as_bytes())?,
+                        )])),
+                    }
+                })?,
+            )?;
+
+            let sp = script_path.clone();
+            g.set(
+                "PLoadModule",
+                lua.create_function(move |lua, (name, args): (String, LuaMultiValue)| {
+                    // check if name has suffix .lua or not
+                    let mut full_name = name.clone();
+                    if !name.ends_with(".lua") {
+                        full_name += ".lua";
+                    }
+
+                    // build the full module path
+                    let module_path = sp.join(full_name);
+
+                    let code = std::fs::read_to_string(&module_path)
+                        .map_err(|e| LuaError::RuntimeError(e.to_string()))?;
+                    match lua.load(&code).call::<LuaMultiValue, LuaMultiValue>(args) {
+                        Ok(results) => {
+                            let mut out = vec![LuaValue::Nil];
+                            out.extend(results);
+                            Ok(LuaMultiValue::from_vec(out))
+                        }
+                        Err(e) => Ok(LuaMultiValue::from_vec(vec![LuaValue::String(
+                            lua.create_string(e.to_string().as_bytes())?,
+                        )])),
+                    }
+                })?,
+            )?;
+
+            let sp = script_path.clone();
+            g.set(
+                "LoadModule",
+                lua.create_function(move |lua, (name, args): (String, LuaMultiValue)| {
+                    // check if name has suffix .lua or not
+                    let mut full_name = name.clone();
+                    if !name.ends_with(".lua") {
+                        full_name += ".lua";
+                    }
+
+                    // build the full module path
+                    let module_path = sp.join(full_name);
+
+                    let code = std::fs::read_to_string(&module_path)
+                        .map_err(|e| LuaError::RuntimeError(e.to_string()))?;
+                    lua.load(&code).call::<LuaMultiValue, LuaMultiValue>(args)
+                })?,
+            )?;
+
+            let sp = script_path.clone();
+            g.set(
+                "GetScriptPath",
+                lua.create_function(move |_, ()| Ok(sp.to_string_lossy().into_owned()))?,
+            )?;
+
+            g.set(
+                "MakeDir",
+                lua.create_function(|_, path: String| {
+                    std::fs::create_dir_all(&path).map_err(LuaError::external)?;
+                    Ok(())
+                })?,
+            )?;
+
+            g.set(
+                "IsKeyDown",
+                lua.create_function(move |_, key: String| {
+                    Ok(pressed_keys.lock().unwrap().contains(&key))
+                })?,
+            )?;
+
+            let cb = clipboard.clone();
+            g.set(
+                "Copy",
+                lua.create_function(move |_, text: String| {
+                    cb.lock().unwrap().set_text(text).ok();
+                    Ok(())
+                })?,
+            )?;
+            let cb = clipboard.clone();
+            g.set(
+                "Paste",
+                lua.create_function(move |_, ()| {
+                    let text = cb.lock().unwrap().get_text().unwrap_or_default();
+                    Ok(text)
+                })?,
+            )?;
+            g.set(
+                "SetDrawLayer",
+                lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+            )?;
+            g.set(
+                "SetViewport",
+                lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+            )?;
+            g.set(
+                "GetVirtualScreenSize",
+                lua.create_function(|_, ()| Ok((1280u32, 720u32)))?,
+            )?;
+            g.set(
+                "GetScreenSize",
+                lua.create_function(|_, ()| Ok((1280u32, 720u32)))?,
+            )?;
+
+            let color: Arc<Mutex<[f32; 4]>> = Arc::new(Mutex::new([1.0, 1.0, 1.0, 1.0]));
+            let color_set = color.clone();
+            let color_draw = color.clone();
+            g.set(
+                "SetDrawColor",
+                lua.create_function(
+                    move |_, (r, g, b, a): (LuaValue, LuaValue, LuaValue, Option<LuaValue>)| {
+                        let to_f32 = |v: LuaValue| match v {
+                            LuaValue::Number(n) => n as f32,
+                            LuaValue::Integer(n) => n as f32,
+                            LuaValue::String(s) => s.to_str().unwrap_or("1").parse().unwrap_or(1.0),
+                            _ => 1.0,
+                        };
+                        *color_set.lock().unwrap() = [
+                            to_f32(r),
+                            to_f32(g),
+                            to_f32(b),
+                            a.map(to_f32).unwrap_or(1.0),
+                        ];
+                        Ok(())
+                    },
+                )?,
+            )?;
+
+            let dq = draw_queue.clone();
+            g.set(
+                "DrawImage",
+                lua.create_function(
+                    move |_, (_handle, x, y, w, h): (LuaValue, f32, f32, f32, f32)| {
+                        let color = *color_draw.lock().unwrap();
+                        dq.lock()
+                            .unwrap()
+                            .push(crate::graphics::DrawCmd { x, y, w, h, color });
+                        Ok(())
+                    },
+                )?,
+            )?;
+
+            g.set(
+                "DrawStringWidth",
+                lua.create_function(|_, _: LuaMultiValue| Ok(1280u32))?,
+            )?;
+
+            let tq = text_queue.clone();
+            let color_text = color.clone();
+            g.set(
+                "DrawString",
+                lua.create_function(
+                    move |_,
+                          (x, y, _align, size, _font, text): (
+                        f32,
+                        f32,
+                        String,
+                        f32,
+                        String,
+                        String,
+                    )| {
+                        let color = *color_text.lock().unwrap();
+                        tq.lock().unwrap().push(crate::graphics::TextCmd {
+                            x,
+                            y,
+                            size,
+                            text,
+                            color,
+                        });
+                        Ok(())
+                    },
+                )?,
+            )?;
+
+            g.set(
+                "GetCursorPos",
+                lua.create_function(move |_, ()| {
+                    let pos = *cursor_pos.lock().unwrap();
+                    Ok((pos[0], pos[1]))
+                })?,
+            )?;
+            g.set(
+                "DrawImageQuad",
+                lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+            )?;
+
+            lua.load(
+                r#"
+                local _require = require
+                local _utf8 = {
+                    reverse = string.reverse,
+                    gsub    = string.gsub,
+                    find    = string.find,
+                    sub     = string.sub,
+                    match   = string.match,
+                    next    = function(s, i, n) return i + (n or 1) end,
+                }
+                function require(name)
+                    if name == "lcurl.safe" then return nil end
+                    if name == "lua-utf8" then return _utf8 end
+                    return _require(name)
+                end
+                "#,
+            )
+            .exec()?;
+            lua.load("arg = {}").exec()?;
+
+            lua.load(
+                r#"
+                function NewImageHandle()
+                    return {
+                        Load = function(self, ...) self.valid = true end,
+                        Unload = function(self) self.valid = false end,
+                        IsValid = function(self) return self.valid end,
+                        ImageSize = function(self) return 1, 1 end,
+                        SetLoadingPriority = function(self, p) end,
+                    }
+                end
+                "#,
+            )
+            .exec()?;
+        }
+
+        Ok(Self {
+            lua,
+            main_object,
+            root_dir,
+        })
+    }
+
+    pub fn launch(&self) -> LuaResult<()> {
+        let path = self.root_dir.join("PathOfBuilding/src/Launch.lua");
+        let code =
+            std::fs::read_to_string(&path).map_err(|e| LuaError::RuntimeError(e.to_string()))?;
+        self.lua.load(&code).exec()
+    }
+
+    pub fn callback(&self, name: &str) -> LuaResult<()> {
+        let guard = self.main_object.lock().unwrap();
+        let Some(key) = guard.as_ref() else {
+            return Ok(());
+        };
+
+        let obj: LuaTable = self.lua.registry_value(key)?;
+        if let Ok(func) = obj.get::<_, LuaFunction>(name) {
+            func.call::<_, ()>(obj.clone())?;
+        }
+        Ok(())
+    }
+
+    pub fn callback_args(&self, name: &str, args: LuaMultiValue) -> LuaResult<()> {
+        let guard = self.main_object.lock().unwrap();
+        let Some(key) = guard.as_ref() else {
+            return Ok(());
+        };
+
+        let obj: LuaTable = self.lua.registry_value(key)?;
+        let mut args_vec = vec![LuaValue::Table(obj.clone())];
+        args_vec.extend(args);
+        if let Ok(func) = obj.get::<_, LuaFunction>(name) {
+            func.call::<LuaMultiValue, ()>(LuaMultiValue::from_vec(args_vec))?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn get_time_returns_u64() {
+        let root_dir = std::env::current_dir().unwrap();
+        let dq = Arc::new(Mutex::new(vec![]));
+        let tq = Arc::new(Mutex::new(vec![]));
+        let cp = Arc::new(Mutex::new([0.0, 0.0]));
+        let host = LuaHost::new(root_dir, dq, tq, cp).unwrap();
+        let t: u64 = host.lua.load("return GetTime()").eval().unwrap();
+        assert!(t < 1000);
+    }
+
+    #[test]
+    fn window_title_does_not_crash() {
+        let root_dir = std::env::current_dir().unwrap();
+        let dq = Arc::new(Mutex::new(vec![]));
+        let tq = Arc::new(Mutex::new(vec![]));
+        let cp = Arc::new(Mutex::new([0.0, 0.0]));
+        let host = LuaHost::new(root_dir, dq, tq, cp).unwrap();
+        host.lua.load(r#"SetWindowTitle("test")"#).exec().unwrap();
+    }
+}
