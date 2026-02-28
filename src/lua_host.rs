@@ -1,10 +1,12 @@
-use arboard::Clipboard;
 use std::{
     collections::HashSet,
+    io::{Read, Write},
     path::PathBuf,
     sync::{Arc, Mutex},
 };
 
+use arboard::Clipboard;
+use flate2::{Compression, read::DeflateDecoder, write::DeflateEncoder};
 use mlua::prelude::*;
 
 use crate::graphics::{CursorPos, DrawQueue, TextQueue};
@@ -148,6 +150,35 @@ impl LuaHost {
                 lua.create_function(move |_, ()| Ok(sp.to_string_lossy().into_owned()))?,
             )?;
 
+            let runtime_dir = root_dir.join("PathOfBuilding/runtime");
+            g.set(
+                "GetRuntimePath",
+                lua.create_function(move |_, ()| Ok(runtime_dir.to_string_lossy().into_owned()))?,
+            )?;
+            g.set(
+                "GetUserPath",
+                lua.create_function(|_, ()| {
+                    let path = dirs::data_dir().unwrap_or_default().join("PathOfBuilding");
+                    std::fs::create_dir_all(&path).ok();
+                    Ok(path.to_string_lossy().into_owned() + "/")
+                })?,
+            )?;
+            g.set(
+                "StripEscapes",
+                lua.create_function(|_, s: String| {
+                    let mut out = String::new();
+                    let mut chars = s.chars().peekable();
+                    while let Some(c) = chars.next() {
+                        if c == '^' {
+                            chars.next();
+                        } else {
+                            out.push(c);
+                        }
+                    }
+                    Ok(out)
+                })?,
+            )?;
+
             g.set(
                 "MakeDir",
                 lua.create_function(|_, path: String| {
@@ -163,6 +194,7 @@ impl LuaHost {
                 })?,
             )?;
 
+            // clipboard
             let cb = clipboard.clone();
             g.set(
                 "Copy",
@@ -179,6 +211,31 @@ impl LuaHost {
                     Ok(text)
                 })?,
             )?;
+
+            // Code parser
+            g.set(
+                "Deflate",
+                lua.create_function(|_, (data, level): (LuaString, u32)| {
+                    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::new(level));
+                    encoder
+                        .write_all(data.as_bytes())
+                        .map_err(LuaError::external)?;
+                    let compressed = encoder.finish().map_err(LuaError::external)?;
+                    Ok(compressed)
+                })?,
+            )?;
+            g.set(
+                "Inflate",
+                lua.create_function(|_, data: LuaString| {
+                    let mut decoder = DeflateDecoder::new(data.as_bytes());
+                    let mut out = String::new();
+                    decoder
+                        .read_to_string(&mut out)
+                        .map_err(LuaError::external)?;
+                    Ok(out)
+                })?,
+            )?;
+
             g.set(
                 "SetDrawLayer",
                 lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
