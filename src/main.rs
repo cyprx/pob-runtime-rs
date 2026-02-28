@@ -4,7 +4,7 @@ mod lua_host;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use crate::graphics::{CursorPos, DrawQueue, TextQueue, Vertex};
+use crate::graphics::{CursorPos, DrawQueue, TextQueue, TextureUploadQueue, Vertex};
 use crate::lua_host::LuaHost;
 
 use mlua::prelude::{LuaMultiValue, LuaValue};
@@ -23,11 +23,13 @@ struct GfxState {
 }
 
 struct App {
+    screen_size: Arc<Mutex<[u32; 2]>>,
     window: Option<Arc<Window>>,
     gfx: Option<GfxState>,
     host: LuaHost,
     draw_queue: DrawQueue,
     text_queue: TextQueue,
+    texture_queue: TextureUploadQueue,
     cursor_pos: CursorPos,
     pressed_keys: Arc<Mutex<HashSet<String>>>,
 }
@@ -71,8 +73,13 @@ impl ApplicationHandler for App {
         ))
         .expect("failed to create device");
         println!("device created");
+        device.on_uncaptured_error(Box::new(|e| {
+            eprintln!("wgpu device error: {:?}", e);
+        }));
 
         let size = window.inner_size();
+        println!("screen size: {}x{}", size.width, size.height);
+        *self.screen_size.lock().unwrap() = [size.width, size.height];
         let caps = surface.get_capabilities(&adapter);
         let format = caps
             .formats
@@ -85,8 +92,8 @@ impl ApplicationHandler for App {
         let config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
-            width: size.width.max(1),
-            height: size.height.max(1),
+            width: size.width,
+            height: size.height,
             present_mode: wgpu::PresentMode::Fifo,
             desired_maximum_frame_latency: 2,
             alpha_mode: caps.alpha_modes[0],
@@ -94,7 +101,7 @@ impl ApplicationHandler for App {
         };
 
         surface.configure(&device, &config);
-        let renderer = graphics::Renderer::new(&device, format);
+        let renderer = graphics::Renderer::new(&device, format, &queue);
         let text_renderer = graphics::TextRenderer::new(&device, &queue, format);
         self.gfx = Some(GfxState {
             surface,
@@ -116,13 +123,15 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(new_size) => {
                 if let Some(g) = &mut self.gfx {
-                    g.config.width = new_size.width.max(1);
-                    g.config.height = new_size.height.max(1);
+                    g.config.width = new_size.width;
+                    g.config.height = new_size.height;
+                    *self.screen_size.lock().unwrap() = [new_size.width, new_size.height];
                     g.surface.configure(&g.device, &g.config);
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 *self.cursor_pos.lock().unwrap() = [position.x as f32, position.y as f32];
+                self.host.callback("OnMouseMove").unwrap();
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let btn = match button {
@@ -209,6 +218,22 @@ impl ApplicationHandler for App {
                     let view = frame.texture.create_view(&Default::default());
                     let mut encoder = g.device.create_command_encoder(&Default::default());
                     {
+                        let uploads = self
+                            .texture_queue
+                            .lock()
+                            .unwrap()
+                            .drain(..)
+                            .collect::<Vec<_>>();
+                        for upload in uploads {
+                            g.renderer.load_texture(
+                                &g.device,
+                                &g.queue,
+                                upload.id,
+                                &upload.rgba,
+                                upload.width,
+                                upload.height,
+                            );
+                        }
                         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                             label: None,
                             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -235,45 +260,11 @@ impl ApplicationHandler for App {
                             .unwrap()
                             .drain(..)
                             .collect::<Vec<_>>();
-                        let mut vertices: Vec<Vertex> = Vec::new();
-                        for cmd in &draw_cmds {
-                            let x2 = cmd.x + cmd.w;
-                            let y2 = cmd.y + cmd.h;
-                            let tl = graphics::Vertex {
-                                position: [cmd.x, cmd.y],
-                                uv: [0.0, 0.0],
-                                color: cmd.color,
-                            };
-                            let tr = graphics::Vertex {
-                                position: [x2, cmd.y],
-                                uv: [1.0, 0.0],
-                                color: cmd.color,
-                            };
-                            let bl = graphics::Vertex {
-                                position: [cmd.x, y2],
-                                uv: [0.0, 1.0],
-                                color: cmd.color,
-                            };
-                            let br = graphics::Vertex {
-                                position: [x2, y2],
-                                uv: [1.0, 1.0],
-                                color: cmd.color,
-                            };
-
-                            // triangle 1
-                            vertices.push(tl);
-                            vertices.push(tr);
-                            vertices.push(bl);
-                            // triangle 2
-                            vertices.push(tr);
-                            vertices.push(br);
-                            vertices.push(bl);
-                        }
                         g.renderer.draw(
                             &mut pass,
                             &g.queue,
                             (g.config.width, g.config.height),
-                            &vertices,
+                            &draw_cmds,
                         );
 
                         println!(
@@ -315,15 +306,19 @@ impl ApplicationHandler for App {
 fn main() {
     let event_loop = EventLoop::new().unwrap();
 
+    let screen_size = Arc::new(Mutex::new([1280u32, 720u32]));
     let root_dir = std::env::current_dir().unwrap();
     let draw_queue = Arc::new(Mutex::new(Vec::new()));
     let text_queue = Arc::new(Mutex::new(Vec::new()));
+    let texture_queue = Arc::new(Mutex::new(Vec::new()));
     let cursor_pos = Arc::new(Mutex::new([0.0, 0.0]));
     let pressed_keys = Arc::new(Mutex::new(HashSet::new()));
     let host = lua_host::LuaHost::new(
         root_dir,
+        screen_size.clone(),
         draw_queue.clone(),
         text_queue.clone(),
+        texture_queue.clone(),
         cursor_pos.clone(),
         pressed_keys.clone(),
     )
@@ -348,6 +343,8 @@ fn main() {
         text_queue,
         cursor_pos,
         pressed_keys,
+        texture_queue,
+        screen_size,
     };
 
     event_loop.run_app(&mut app).unwrap();

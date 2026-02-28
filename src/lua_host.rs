@@ -7,9 +7,10 @@ use std::{
 
 use arboard::Clipboard;
 use flate2::{Compression, read::DeflateDecoder, write::DeflateEncoder};
+use image::EncodableLayout;
 use mlua::prelude::*;
 
-use crate::graphics::{CursorPos, DrawQueue, TextQueue};
+use crate::graphics::{CursorPos, DrawQueue, TextQueue, TextureUploadQueue};
 
 pub struct LuaHost {
     pub lua: Lua,
@@ -20,8 +21,10 @@ pub struct LuaHost {
 impl LuaHost {
     pub fn new(
         root_dir: PathBuf,
+        screen_size: Arc<Mutex<[u32; 2]>>,
         draw_queue: DrawQueue,
         text_queue: TextQueue,
+        texture_queue: TextureUploadQueue,
         cursor_pos: CursorPos,
         pressed_keys: Arc<Mutex<HashSet<String>>>,
     ) -> LuaResult<Self> {
@@ -244,13 +247,21 @@ impl LuaHost {
                 "SetViewport",
                 lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
             )?;
+            let ss = screen_size.clone();
             g.set(
                 "GetVirtualScreenSize",
-                lua.create_function(|_, ()| Ok((1280u32, 720u32)))?,
+                lua.create_function(move |_, ()| {
+                    let v = ss.lock().unwrap();
+                    Ok((v[0], v[1]))
+                })?,
             )?;
+            let ss = screen_size.clone();
             g.set(
                 "GetScreenSize",
-                lua.create_function(|_, ()| Ok((1280u32, 720u32)))?,
+                lua.create_function(move |_, ()| {
+                    let v = ss.lock().unwrap();
+                    Ok((v[0], v[1]))
+                })?,
             )?;
 
             let color: Arc<Mutex<[f32; 4]>> = Arc::new(Mutex::new([1.0, 1.0, 1.0, 1.0]));
@@ -281,11 +292,21 @@ impl LuaHost {
             g.set(
                 "DrawImage",
                 lua.create_function(
-                    move |_, (_handle, x, y, w, h): (LuaValue, f32, f32, f32, f32)| {
+                    move |_, (handle, x, y, w, h): (LuaValue, f32, f32, f32, f32)| {
+                        let texture_id = if let LuaValue::Table(t) = &handle {
+                            t.get::<_, u32>("id").unwrap_or(0)
+                        } else {
+                            0
+                        };
                         let color = *color_draw.lock().unwrap();
-                        dq.lock()
-                            .unwrap()
-                            .push(crate::graphics::DrawCmd { x, y, w, h, color });
+                        dq.lock().unwrap().push(crate::graphics::DrawCmd {
+                            x,
+                            y,
+                            w,
+                            h,
+                            color,
+                            texture_id,
+                        });
                         Ok(())
                     },
                 )?,
@@ -356,20 +377,79 @@ impl LuaHost {
             .exec()?;
             lua.load("arg = {}").exec()?;
 
-            lua.load(
-                r#"
-                function NewImageHandle()
-                    return {
-                        Load = function(self, ...) self.valid = true end,
-                        Unload = function(self) self.valid = false end,
-                        IsValid = function(self) return self.valid end,
-                        ImageSize = function(self) return 1, 1 end,
-                        SetLoadingPriority = function(self, p) end,
-                    }
-                end
-                "#,
-            )
-            .exec()?;
+            let next_id = Arc::new(Mutex::new(1));
+            let tuq = texture_queue.clone();
+            g.set(
+                "NewImageHandle",
+                lua.create_function(move |lua, ()| {
+                    let id = {
+                        let mut n = next_id.lock().unwrap();
+                        let id = *n;
+                        *n += 1;
+                        id
+                    };
+
+                    let t = lua.create_table()?;
+                    t.set("id", id)?;
+                    t.set("valid", false)?;
+                    t.set("width", 0u32)?;
+                    t.set("height", 0u32)?;
+
+                    let tuq2 = tuq.clone();
+
+                    t.set(
+                        "Load",
+                        lua.create_function(
+                            move |_, (this, path, _): (LuaTable, String, LuaMultiValue)| {
+                                let img = match image::open(&path) {
+                                    Ok(img) => img.to_rgba8(),
+                                    Err(e) => {
+                                        println!("Load image {}: {}", path, e);
+                                        return Ok(());
+                                    }
+                                };
+                                let w = img.width();
+                                let h = img.height();
+                                let rgba = img.into_raw();
+                                tuq2.lock()
+                                    .unwrap()
+                                    .push(crate::graphics::TextureUploadCmd {
+                                        id,
+                                        rgba: rgba,
+                                        width: w,
+                                        height: h,
+                                    });
+                                this.set("valid", true)?;
+                                this.set("width", w)?;
+                                this.set("height", h)?;
+
+                                Ok(())
+                            },
+                        )?,
+                    )?;
+
+                    t.set(
+                        "IsValid",
+                        lua.create_function(|_, this: LuaTable| Ok(this.get::<_, bool>("valid")?))?,
+                    )?;
+                    t.set(
+                        "ImageSize",
+                        lua.create_function(|_, this: LuaTable| {
+                            Ok((this.get::<_, u32>("width")?, this.get::<_, u32>("height")?))
+                        })?,
+                    )?;
+                    t.set(
+                        "Unload",
+                        lua.create_function(|_, this: LuaTable| this.set("valid", false))?,
+                    )?;
+                    t.set(
+                        "SetLoadingPriority",
+                        lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+                    )?;
+
+                    Ok(t)
+                })?,
+            )?;
         }
 
         Ok(Self {
@@ -425,7 +505,8 @@ mod tests {
         let dq = Arc::new(Mutex::new(vec![]));
         let tq = Arc::new(Mutex::new(vec![]));
         let cp = Arc::new(Mutex::new([0.0, 0.0]));
-        let host = LuaHost::new(root_dir, dq, tq, cp).unwrap();
+        let hs = Arc::new(Mutex::new(HashSet::new()));
+        let host = LuaHost::new(root_dir, dq, tq, cp, hs).unwrap();
         let t: u64 = host.lua.load("return GetTime()").eval().unwrap();
         assert!(t < 1000);
     }
@@ -436,7 +517,8 @@ mod tests {
         let dq = Arc::new(Mutex::new(vec![]));
         let tq = Arc::new(Mutex::new(vec![]));
         let cp = Arc::new(Mutex::new([0.0, 0.0]));
-        let host = LuaHost::new(root_dir, dq, tq, cp).unwrap();
+        let hs = Arc::new(Mutex::new(HashSet::new()));
+        let host = LuaHost::new(root_dir, dq, tq, cp, hs).unwrap();
         host.lua.load(r#"SetWindowTitle("test")"#).exec().unwrap();
     }
 }
