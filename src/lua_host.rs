@@ -416,11 +416,15 @@ impl LuaHost {
                             tcb.unwrap_or(0.0),
                         ];
                         let clip = *vp.lock().unwrap();
+                        let (ox, oy) = match *vp.lock().unwrap() {
+                            Some([vx, vy, _, _]) => (vx as f32, vy as f32),
+                            None => (0.0, 0.0),
+                        };
                         dq.lock()
                             .unwrap()
                             .push(DrawItem::Rect(crate::graphics::DrawCmd {
-                                x,
-                                y,
+                                x: x + ox,
+                                y: y + oy,
                                 w,
                                 h,
                                 color,
@@ -505,11 +509,15 @@ impl LuaHost {
                     )| {
                         let color = *color_text.lock().unwrap();
                         let stripped_text = strip_pob_escapes(&text);
+                        let (ox, oy) = match *vp_text.lock().unwrap() {
+                            Some([vx, vy, _, _]) => (vx as f32, vy as f32),
+                            None => (0.0, 0.0),
+                        };
                         dq.lock()
                             .unwrap()
                             .push(DrawItem::Text(crate::graphics::TextCmd {
-                                x,
-                                y,
+                                x: x + ox,
+                                y: y + oy,
                                 size,
                                 color,
                                 text: stripped_text,
@@ -546,6 +554,10 @@ impl LuaHost {
                             _ => default,
                         }
                     };
+                    let (ox, oy) = match *vp_quad.lock().unwrap() {
+                        Some([vx, vy, _, _]) => (vx as f32, vy as f32),
+                        None => (0.0, 0.0),
+                    };
 
                     let x1 = next_f32(0.0);
                     let y1 = next_f32(0.0);
@@ -574,7 +586,12 @@ impl LuaHost {
                         texture_id,
                         color: *color_quad.lock().unwrap(),
                         clip: *vp_quad.lock().unwrap(),
-                        positions: [[x1, y1], [x2, y2], [x3, y3], [x4, y4]],
+                        positions: [
+                            [x1 + ox, y1 + oy],
+                            [x2 + ox, y2 + oy],
+                            [x3 + ox, y3 + oy],
+                            [x4 + ox, y4 + oy],
+                        ],
                         uvs: [[s1, t1], [s2, t2], [s3, t3], [s4, t4]],
                     }));
                     Ok(())
