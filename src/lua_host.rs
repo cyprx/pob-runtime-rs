@@ -169,15 +169,7 @@ impl LuaHost {
             g.set(
                 "StripEscapes",
                 lua.create_function(|_, s: String| {
-                    let mut out = String::new();
-                    let mut chars = s.chars().peekable();
-                    while let Some(c) = chars.next() {
-                        if c == '^' {
-                            chars.next();
-                        } else {
-                            out.push(c);
-                        }
-                    }
+                    let out = strip_pob_escapes(&s);
                     Ok(out)
                 })?,
             )?;
@@ -332,12 +324,13 @@ impl LuaHost {
                         String,
                     )| {
                         let color = *color_text.lock().unwrap();
+                        let stripped_text = strip_pob_escapes(&text);
                         tq.lock().unwrap().push(crate::graphics::TextCmd {
                             x,
                             y,
                             size,
-                            text,
                             color,
+                            text: stripped_text,
                         });
                         Ok(())
                     },
@@ -493,6 +486,35 @@ impl LuaHost {
         }
         Ok(())
     }
+}
+
+fn strip_pob_escapes(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '^' {
+            out.push(c);
+            continue;
+        }
+        match chars.peek().copied() {
+            Some('0'..='9') => {
+                chars.next();
+            }
+            Some('x') => {
+                chars.next();
+                for _ in 0..6 {
+                    match chars.peek() {
+                        Some(h) if h.is_ascii_hexdigit() => {
+                            chars.next();
+                        }
+                        _ => break,
+                    }
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
