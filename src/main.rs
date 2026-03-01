@@ -123,8 +123,8 @@ impl ApplicationHandler for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(new_size) => {
                 if let Some(g) = &mut self.gfx {
-                    g.config.width = new_size.width;
-                    g.config.height = new_size.height;
+                    g.config.width = new_size.width.max(1);
+                    g.config.height = new_size.height.max(1);
                     *self.screen_size.lock().unwrap() = [new_size.width, new_size.height];
                     g.surface.configure(&g.device, &g.config);
                 }
@@ -135,30 +135,26 @@ impl ApplicationHandler for App {
             }
             WindowEvent::MouseInput { state, button, .. } => {
                 let btn = match button {
-                    winit::event::MouseButton::Left => 1i64,
-                    winit::event::MouseButton::Right => 2i64,
-                    winit::event::MouseButton::Middle => 3i64,
+                    winit::event::MouseButton::Left => "LEFTBUTTON",
+                    winit::event::MouseButton::Right => "RIGHTBUTTON",
+                    winit::event::MouseButton::Middle => "MIDDLEBUTTON",
                     _ => return,
                 };
 
                 match state {
                     winit::event::ElementState::Pressed => {
+                        let key = LuaValue::String(self.host.lua.create_string(btn).unwrap());
                         self.host
                             .callback_args(
-                                "OnMouseDown",
-                                LuaMultiValue::from_vec(vec![
-                                    LuaValue::Integer(btn),
-                                    LuaValue::Boolean(false),
-                                ]),
+                                "OnKeyDown",
+                                LuaMultiValue::from_vec(vec![key, LuaValue::Boolean(false)]),
                             )
                             .unwrap();
                     }
                     winit::event::ElementState::Released => {
+                        let key = LuaValue::String(self.host.lua.create_string(btn).unwrap());
                         self.host
-                            .callback_args(
-                                "OnMouseUp",
-                                LuaMultiValue::from_vec(vec![LuaValue::Integer(btn)]),
-                            )
+                            .callback_args("OnKeyUp", LuaMultiValue::from_vec(vec![key]))
                             .unwrap();
                     }
                 }
@@ -169,11 +165,12 @@ impl ApplicationHandler for App {
                     winit::event::MouseScrollDelta::PixelDelta(pos) => pos.y as f32 / 20.0,
                 };
                 if lines != 0.0 {
-                    let dir = if lines > 0.0 { 1i64 } else { -1i64 };
+                    let dir = if lines > 0.0 { "WHEELUP" } else { "WHEELDOWN" };
+                    let key = LuaValue::String(self.host.lua.create_string(dir).unwrap());
                     self.host
                         .callback_args(
-                            "OnMouseWheel",
-                            LuaMultiValue::from_vec(vec![LuaValue::Integer(dir)]),
+                            "OnKeyDown",
+                            LuaMultiValue::from_vec(vec![key, LuaValue::Boolean(false)]),
                         )
                         .unwrap();
                 }
@@ -330,10 +327,43 @@ fn main() {
         "main object set: {}",
         host.main_object.lock().unwrap().is_some()
     );
-    host.lua.load("launch.devMode = true").exec().unwrap();
+
     host.callback("OnInit").unwrap();
     let msg: Option<String> = host.lua.load("return launch.promptMsg").eval().unwrap();
     println!("promptMsg: {:?}", msg);
+
+    host.lua
+        .load(
+            r##"
+      -- Log any runtime errors PoB catches
+      local origSEM = launch.ShowErrMsg
+      launch.ShowErrMsg = function(self, fmt, ...)
+          local msg = string.format(fmt, ...)
+          print("ShowErrMsg: " .. tostring(msg))
+          return origSEM(self, fmt, ...)
+      end
+
+      -- Log when any control is actually dispatched
+      local ControlHostClass = main.__index
+      local origGMC = ControlHostClass.GetMouseOverControl
+      ControlHostClass.GetMouseOverControl = function(self)
+          local result = origGMC(self)
+          if result then
+              local cx, cy = GetCursorPos()
+              if cx > 0 or cy > 0 then
+                  local name = "?"
+                  for n, c in pairs(self.controls) do
+                      if c == result then name = n; break end
+                  end
+                  print("DISPATCH -> " .. name .. " at " .. math.floor(cx) .. "," .. math.floor(cy))
+              end
+          end
+          return result
+      end
+  "##,
+        )
+        .exec()
+        .unwrap();
 
     let mut app = App {
         window: None,
