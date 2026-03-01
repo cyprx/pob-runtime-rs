@@ -456,6 +456,9 @@ pub struct TextCmd {
     pub size: f32,
     pub text: String,
     pub color: [f32; 4],
+    pub align: String,
+    pub font: String,
+    pub clip: Option<[u32; 4]>,
 }
 
 pub type TextQueue = Arc<Mutex<Vec<TextCmd>>>;
@@ -503,10 +506,15 @@ impl TextRenderer {
                 screen_size.1 as f32,
             );
 
+            let attrs = match cmd.font.as_str() {
+                "FIXED" => glyphon::Attrs::new().family(glyphon::Family::Monospace),
+                _ => glyphon::Attrs::new().family(glyphon::Family::SansSerif),
+            };
+
             buffer.set_text(
                 &mut self.font_system,
                 &cmd.text,
-                glyphon::Attrs::new(),
+                attrs,
                 glyphon::Shaping::Basic,
             );
             buffers.push(buffer);
@@ -519,17 +527,35 @@ impl TextRenderer {
                 (cmd.color[2] * 255.0) as u8,
                 (cmd.color[3] * 255.0) as u8,
             );
-            text_areas.push(glyphon::TextArea {
-                buffer: &buffers[i],
-                left: cmd.x,
-                top: cmd.y,
-                scale: 1.0,
-                bounds: glyphon::TextBounds {
+            let line_w = buffers[i]
+                .layout_runs()
+                .map(|r| r.line_w)
+                .fold(0.0f32, f32::max);
+            let left = match cmd.align.as_str() {
+                "RIGHT" => cmd.x - line_w,
+                "CENTER" => cmd.x - line_w / 2.0,
+                _ => cmd.x,
+            };
+            let bounds = match cmd.clip {
+                Some([cx, cy, cw, ch]) => glyphon::TextBounds {
+                    left: cx as i32,
+                    top: cy as i32,
+                    right: (cx + cw) as i32,
+                    bottom: (cy + ch) as i32,
+                },
+                None => glyphon::TextBounds {
                     left: 0,
                     top: 0,
                     right: screen_size.0 as i32,
                     bottom: screen_size.1 as i32,
                 },
+            };
+            text_areas.push(glyphon::TextArea {
+                buffer: &buffers[i],
+                left: left,
+                top: cmd.y,
+                scale: 1.0,
+                bounds,
                 default_color: cmd_color,
             })
         }

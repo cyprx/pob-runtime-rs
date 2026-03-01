@@ -491,11 +491,12 @@ impl LuaHost {
 
             let tq = text_queue.clone();
             let color_text = color.clone();
+            let vp_text = viewport.clone();
             g.set(
                 "DrawString",
                 lua.create_function(
                     move |_,
-                          (x, y, _align, size, _font, text): (
+                          (x, y, align, size, font, text): (
                         f32,
                         f32,
                         String,
@@ -511,6 +512,9 @@ impl LuaHost {
                             size,
                             color,
                             text: stripped_text,
+                            align,
+                            font,
+                            clip: *vp_text.lock().unwrap(),
                         });
                         Ok(())
                     },
