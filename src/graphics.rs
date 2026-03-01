@@ -57,7 +57,21 @@ pub struct DrawCmd {
     pub clip: Option<[u32; 4]>,
 }
 
-pub type DrawQueue = Arc<Mutex<Vec<DrawCmd>>>;
+#[derive(Clone)]
+pub struct DrawQuadCmd {
+    pub texture_id: u32,
+    pub color: [f32; 4],
+    pub clip: Option<[u32; 4]>,
+    pub positions: [[f32; 2]; 4],
+    pub uvs: [[f32; 2]; 4],
+}
+
+pub enum DrawItem {
+    Rect(DrawCmd),
+    Quad(DrawQuadCmd),
+}
+
+pub type DrawQueue = Arc<Mutex<Vec<DrawItem>>>;
 
 pub type CursorPos = Arc<Mutex<[f32; 2]>>;
 
@@ -312,7 +326,7 @@ impl Renderer {
         pass: &mut wgpu::RenderPass<'a>,
         queue: &wgpu::Queue,
         screen_size: (u32, u32),
-        cmds: &[DrawCmd],
+        cmds: &[DrawItem],
     ) {
         let uniform = ScreenUniform {
             size: [screen_size.0 as f32, screen_size.1 as f32],
@@ -323,56 +337,90 @@ impl Renderer {
         pass.set_bind_group(0, &self.screen_bind_group, &[]);
         pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
 
+        let tid_of = |item: &DrawItem| match item {
+            DrawItem::Rect(c) => c.texture_id,
+            DrawItem::Quad(c) => c.texture_id,
+        };
+
+        let clip_of = |item: &DrawItem| match item {
+            DrawItem::Rect(c) => c.clip,
+            DrawItem::Quad(c) => c.clip,
+        };
+
         // batch by texture_id
         let mut byte_offset: u64 = 0;
         let vertex_size = std::mem::size_of::<Vertex>() as u64;
         let mut i = 0;
         while i < cmds.len() {
-            let tid = cmds[i].texture_id;
+            let tid = tid_of(&cmds[i]);
             let start = i;
-            while i < cmds.len() && cmds[i].texture_id == tid && cmds[i].clip == cmds[start].clip {
+            while i < cmds.len()
+                && tid_of(&cmds[i]) == tid
+                && clip_of(&cmds[i]) == clip_of(&cmds[start])
+            {
                 i += 1;
             }
             let mut vertices: Vec<Vertex> = Vec::new();
-            for cmd in &cmds[start..i] {
-                let x2 = cmd.x + cmd.w;
-                let y2 = cmd.y + cmd.h;
-                let tl = Vertex {
-                    position: [cmd.x, cmd.y],
-                    uv: [cmd.uv[0], cmd.uv[1]],
-                    color: cmd.color,
-                };
-                let tr = Vertex {
-                    position: [x2, cmd.y],
-                    uv: [cmd.uv[2], cmd.uv[1]],
-                    color: cmd.color,
-                };
-                let bl = Vertex {
-                    position: [cmd.x, y2],
-                    uv: [cmd.uv[0], cmd.uv[3]],
-                    color: cmd.color,
-                };
-                let br = Vertex {
-                    position: [x2, y2],
-                    uv: [cmd.uv[2], cmd.uv[3]],
-                    color: cmd.color,
-                };
+            for item in &cmds[start..i] {
+                match item {
+                    DrawItem::Rect(cmd) => {
+                        let x2 = cmd.x + cmd.w;
+                        let y2 = cmd.y + cmd.h;
+                        let tl = Vertex {
+                            position: [cmd.x, cmd.y],
+                            uv: [cmd.uv[0], cmd.uv[1]],
+                            color: cmd.color,
+                        };
+                        let tr = Vertex {
+                            position: [x2, cmd.y],
+                            uv: [cmd.uv[2], cmd.uv[1]],
+                            color: cmd.color,
+                        };
+                        let bl = Vertex {
+                            position: [cmd.x, y2],
+                            uv: [cmd.uv[0], cmd.uv[3]],
+                            color: cmd.color,
+                        };
+                        let br = Vertex {
+                            position: [x2, y2],
+                            uv: [cmd.uv[2], cmd.uv[3]],
+                            color: cmd.color,
+                        };
 
-                // triangle 1
-                vertices.push(tl);
-                vertices.push(tr);
-                vertices.push(bl);
-                // triangle 2
-                vertices.push(tr);
-                vertices.push(br);
-                vertices.push(bl);
+                        // triangle 1
+                        vertices.push(tl);
+                        vertices.push(tr);
+                        vertices.push(bl);
+                        // triangle 2
+                        vertices.push(tr);
+                        vertices.push(br);
+                        vertices.push(bl);
+                    }
+                    DrawItem::Quad(cmd) => {
+                        let [p1, p2, p3, p4] = cmd.positions;
+                        let [uv1, uv2, uv3, uv4] = cmd.uvs;
+                        let v = |p: [f32; 2], uv: [f32; 2]| Vertex {
+                            position: p,
+                            uv,
+                            color: cmd.color,
+                        };
+                        vertices.extend_from_slice(&[
+                            v(p1, uv1),
+                            v(p2, uv2),
+                            v(p3, uv3),
+                            v(p1, uv1),
+                            v(p3, uv3),
+                            v(p4, uv4),
+                        ]);
+                    }
+                }
             }
 
             let bg = self
                 .textures
                 .get(&tid)
                 .unwrap_or_else(|| self.textures.get(&0).unwrap());
-            match cmds[start].clip {
+            match clip_of(&cmds[start]) {
                 Some([cx, cy, cw, ch]) => {
                     pass.set_scissor_rect(cx, cy, cw.max(1), ch.max(1));
                 }

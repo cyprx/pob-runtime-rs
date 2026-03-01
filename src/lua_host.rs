@@ -10,7 +10,9 @@ use flate2::{Compression, read::DeflateDecoder, write::DeflateEncoder};
 use glyphon::{Buffer, FontSystem};
 use mlua::prelude::*;
 
-use crate::graphics::{CursorPos, DrawQueue, TextQueue, TextureUploadQueue};
+use crate::graphics::{
+    CursorPos, DrawCmd, DrawItem, DrawQuadCmd, DrawQueue, TextQueue, TextureUploadQueue,
+};
 
 pub struct LuaHost {
     pub lua: Lua,
@@ -386,6 +388,7 @@ impl LuaHost {
             )?;
 
             let dq = draw_queue.clone();
+            let vp = viewport.clone();
             g.set(
                 "DrawImage",
                 lua.create_function(
@@ -413,17 +416,19 @@ impl LuaHost {
                             tcr.unwrap_or(0.0),
                             tcb.unwrap_or(0.0),
                         ];
-                        let clip = *viewport.lock().unwrap();
-                        dq.lock().unwrap().push(crate::graphics::DrawCmd {
-                            x,
-                            y,
-                            w,
-                            h,
-                            color,
-                            texture_id,
-                            uv,
-                            clip,
-                        });
+                        let clip = *vp.lock().unwrap();
+                        dq.lock()
+                            .unwrap()
+                            .push(DrawItem::Rect(crate::graphics::DrawCmd {
+                                x,
+                                y,
+                                w,
+                                h,
+                                color,
+                                texture_id,
+                                uv,
+                                clip,
+                            }));
                         Ok(())
                     },
                 )?,
@@ -519,9 +524,56 @@ impl LuaHost {
                     Ok((pos[0], pos[1]))
                 })?,
             )?;
+
+            let dq = draw_queue.clone();
+            let color_quad = color.clone();
+            let vp_quad = viewport.clone();
             g.set(
                 "DrawImageQuad",
-                lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+                lua.create_function(move |_, args: LuaMultiValue| {
+                    let mut iter = args.iter();
+                    let handle = iter.next().cloned().unwrap_or(LuaValue::Nil);
+
+                    let mut next_f32 = |default: f32| -> f32 {
+                        match iter.next() {
+                            Some(LuaValue::Number(n)) => *n as f32,
+                            Some(LuaValue::Integer(n)) => *n as f32,
+                            _ => default,
+                        }
+                    };
+
+                    let x1 = next_f32(0.0);
+                    let y1 = next_f32(0.0);
+                    let x2 = next_f32(0.0);
+                    let y2 = next_f32(0.0);
+                    let x3 = next_f32(0.0);
+                    let y3 = next_f32(0.0);
+                    let x4 = next_f32(0.0);
+                    let y4 = next_f32(0.0);
+
+                    let s1 = next_f32(0.0);
+                    let t1 = next_f32(0.0);
+                    let s2 = next_f32(0.0);
+                    let t2 = next_f32(0.0);
+                    let s3 = next_f32(0.0);
+                    let t3 = next_f32(0.0);
+                    let s4 = next_f32(0.0);
+                    let t4 = next_f32(0.0);
+
+                    let texture_id = if let LuaValue::Table(t) = &handle {
+                        t.get::<_, u32>("id").unwrap_or(0)
+                    } else {
+                        0
+                    };
+                    dq.lock().unwrap().push(DrawItem::Quad(DrawQuadCmd {
+                        texture_id,
+                        color: *color_quad.lock().unwrap(),
+                        clip: *vp_quad.lock().unwrap(),
+                        positions: [[x1, y1], [x2, y2], [x3, y3], [x4, y4]],
+                        uvs: [[s1, t1], [s2, t2], [s3, t3], [s4, t4]],
+                    }));
+                    Ok(())
+                })?,
             )?;
 
             lua.load(
