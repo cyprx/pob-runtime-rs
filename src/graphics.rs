@@ -542,8 +542,8 @@ impl TextRenderer {
                 .map(|r| r.line_w)
                 .fold(0.0f32, f32::max);
             let left = match cmd.align.as_str() {
-                "RIGHT" => cmd.x - line_w,
-                "CENTER" => cmd.x - line_w / 2.0,
+                "RIGHT_X" => cmd.x - line_w,
+                "CENTER_X" => cmd.x - line_w / 2.0,
                 _ => cmd.x,
             };
             let bounds = match cmd.clip {
