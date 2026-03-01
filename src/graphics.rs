@@ -375,6 +375,10 @@ impl Renderer {
             if vertices.is_empty() {
                 continue;
             }
+            let buffer_cap = self.vertex_buffer.size();
+            if byte_offset + vertices.len() as u64 * vertex_size > buffer_cap {
+                break;
+            }
             queue.write_buffer(
                 &self.vertex_buffer,
                 byte_offset,
