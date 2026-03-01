@@ -284,13 +284,30 @@ impl LuaHost {
             g.set(
                 "DrawImage",
                 lua.create_function(
-                    move |_, (handle, x, y, w, h): (LuaValue, f32, f32, f32, f32)| {
+                    move |_,
+                          (handle, x, y, w, h, tcl, tct, tcr, tcb): (
+                        LuaValue,
+                        f32,
+                        f32,
+                        f32,
+                        f32,
+                        Option<f32>,
+                        Option<f32>,
+                        Option<f32>,
+                        Option<f32>,
+                    )| {
                         let texture_id = if let LuaValue::Table(t) = &handle {
                             t.get::<_, u32>("id").unwrap_or(0)
                         } else {
                             0
                         };
                         let color = *color_draw.lock().unwrap();
+                        let uv = [
+                            tcl.unwrap_or(0.0),
+                            tct.unwrap_or(0.0),
+                            tcr.unwrap_or(0.0),
+                            tcb.unwrap_or(0.0),
+                        ];
                         dq.lock().unwrap().push(crate::graphics::DrawCmd {
                             x,
                             y,
@@ -298,6 +315,7 @@ impl LuaHost {
                             h,
                             color,
                             texture_id,
+                            uv,
                         });
                         Ok(())
                     },

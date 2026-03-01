@@ -53,6 +53,7 @@ pub struct DrawCmd {
     pub h: f32,
     pub color: [f32; 4],
     pub texture_id: u32,
+    pub uv: [f32; 4], // [tcLeft, tcTop, tcRight, tcBottom]
 }
 
 pub type DrawQueue = Arc<Mutex<Vec<DrawCmd>>>;
@@ -337,22 +338,22 @@ impl Renderer {
                 let y2 = cmd.y + cmd.h;
                 let tl = Vertex {
                     position: [cmd.x, cmd.y],
-                    uv: [0.0, 0.0],
+                    uv: [cmd.uv[0], cmd.uv[1]],
                     color: cmd.color,
                 };
                 let tr = Vertex {
                     position: [x2, cmd.y],
-                    uv: [1.0, 0.0],
+                    uv: [cmd.uv[2], cmd.uv[1]],
                     color: cmd.color,
                 };
                 let bl = Vertex {
                     position: [cmd.x, y2],
-                    uv: [0.0, 1.0],
+                    uv: [cmd.uv[0], cmd.uv[3]],
                     color: cmd.color,
                 };
                 let br = Vertex {
                     position: [x2, y2],
-                    uv: [1.0, 1.0],
+                    uv: [cmd.uv[2], cmd.uv[3]],
                     color: cmd.color,
                 };
 
