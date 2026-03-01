@@ -4,7 +4,7 @@ mod lua_host;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
-use crate::graphics::{CursorPos, DrawQueue, TextQueue, TextureUploadQueue, Vertex};
+use crate::graphics::{CursorPos, DrawItem, DrawQueue, TextCmd, TextureUploadQueue, Vertex};
 use crate::lua_host::LuaHost;
 
 use mlua::prelude::{LuaMultiValue, LuaValue};
@@ -28,7 +28,6 @@ struct App {
     gfx: Option<GfxState>,
     host: LuaHost,
     draw_queue: DrawQueue,
-    text_queue: TextQueue,
     texture_queue: TextureUploadQueue,
     cursor_pos: CursorPos,
     pressed_keys: Arc<Mutex<HashSet<String>>>,
@@ -231,6 +230,25 @@ impl ApplicationHandler for App {
                                 upload.height,
                             );
                         }
+
+                        // text & images
+                        g.renderer.begin_frame();
+                        let all_cmds = self
+                            .draw_queue
+                            .lock()
+                            .unwrap()
+                            .drain(..)
+                            .collect::<Vec<_>>();
+                        let texts: Vec<TextCmd> = all_cmds
+                            .iter()
+                            .filter_map(|d| {
+                                if let DrawItem::Text(t) = d {
+                                    Some(t.clone())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect();
                         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                             label: None,
                             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -250,36 +268,19 @@ impl ApplicationHandler for App {
                             timestamp_writes: None,
                             occlusion_query_set: None,
                         });
-                        println!("DrawImage calls: {}", self.draw_queue.lock().unwrap().len());
-                        let draw_cmds = self
-                            .draw_queue
-                            .lock()
-                            .unwrap()
-                            .drain(..)
-                            .collect::<Vec<_>>();
                         g.renderer.draw(
                             &mut pass,
                             &g.queue,
                             (g.config.width, g.config.height),
-                            &draw_cmds,
+                            &all_cmds,
                         );
 
-                        println!(
-                            "DrawString calls: {}",
-                            self.text_queue.lock().unwrap().len()
-                        );
-                        let text_cmds = self
-                            .text_queue
-                            .lock()
-                            .unwrap()
-                            .drain(..)
-                            .collect::<Vec<_>>();
                         g.text_renderer
                             .prepare(
                                 &g.device,
                                 &g.queue,
                                 (g.config.width, g.config.height),
-                                &text_cmds,
+                                &texts,
                             )
                             .unwrap();
                         g.text_renderer.render(&mut pass).unwrap();
@@ -306,7 +307,6 @@ fn main() {
     let screen_size = Arc::new(Mutex::new([1280u32, 720u32]));
     let root_dir = std::env::current_dir().unwrap();
     let draw_queue = Arc::new(Mutex::new(Vec::new()));
-    let text_queue = Arc::new(Mutex::new(Vec::new()));
     let texture_queue = Arc::new(Mutex::new(Vec::new()));
     let cursor_pos = Arc::new(Mutex::new([0.0, 0.0]));
     let pressed_keys = Arc::new(Mutex::new(HashSet::new()));
@@ -314,7 +314,6 @@ fn main() {
         root_dir,
         screen_size.clone(),
         draw_queue.clone(),
-        text_queue.clone(),
         texture_queue.clone(),
         cursor_pos.clone(),
         pressed_keys.clone(),
@@ -370,7 +369,6 @@ fn main() {
         gfx: None,
         host,
         draw_queue,
-        text_queue,
         cursor_pos,
         pressed_keys,
         texture_queue,

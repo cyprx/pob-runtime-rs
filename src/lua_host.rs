@@ -25,7 +25,6 @@ impl LuaHost {
         root_dir: PathBuf,
         screen_size: Arc<Mutex<[u32; 2]>>,
         draw_queue: DrawQueue,
-        text_queue: TextQueue,
         texture_queue: TextureUploadQueue,
         cursor_pos: CursorPos,
         pressed_keys: Arc<Mutex<HashSet<String>>>,
@@ -489,7 +488,7 @@ impl LuaHost {
                 )?,
             )?;
 
-            let tq = text_queue.clone();
+            let dq = draw_queue.clone();
             let color_text = color.clone();
             let vp_text = viewport.clone();
             g.set(
@@ -506,16 +505,18 @@ impl LuaHost {
                     )| {
                         let color = *color_text.lock().unwrap();
                         let stripped_text = strip_pob_escapes(&text);
-                        tq.lock().unwrap().push(crate::graphics::TextCmd {
-                            x,
-                            y,
-                            size,
-                            color,
-                            text: stripped_text,
-                            align,
-                            font,
-                            clip: *vp_text.lock().unwrap(),
-                        });
+                        dq.lock()
+                            .unwrap()
+                            .push(DrawItem::Text(crate::graphics::TextCmd {
+                                x,
+                                y,
+                                size,
+                                color,
+                                text: stripped_text,
+                                align,
+                                font,
+                                clip: *vp_text.lock().unwrap(),
+                            }));
                         Ok(())
                     },
                 )?,

@@ -69,6 +69,7 @@ pub struct DrawQuadCmd {
 pub enum DrawItem {
     Rect(DrawCmd),
     Quad(DrawQuadCmd),
+    Text(TextCmd),
 }
 
 pub type DrawQueue = Arc<Mutex<Vec<DrawItem>>>;
@@ -93,6 +94,7 @@ pub struct Renderer {
     texture_bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     textures: HashMap<u32, wgpu::BindGroup>,
+    byte_offset: u64,
 }
 
 impl Renderer {
@@ -260,7 +262,12 @@ impl Renderer {
             texture_bind_group_layout,
             sampler,
             textures,
+            byte_offset: 0,
         }
+    }
+
+    pub fn begin_frame(&mut self) {
+        self.byte_offset = 0;
     }
 
     pub fn load_texture(
@@ -322,7 +329,7 @@ impl Renderer {
     }
 
     pub fn draw<'a>(
-        &'a self,
+        &'a mut self,
         pass: &mut wgpu::RenderPass<'a>,
         queue: &wgpu::Queue,
         screen_size: (u32, u32),
@@ -340,15 +347,16 @@ impl Renderer {
         let tid_of = |item: &DrawItem| match item {
             DrawItem::Rect(c) => c.texture_id,
             DrawItem::Quad(c) => c.texture_id,
+            DrawItem::Text(_) => 0u32,
         };
 
         let clip_of = |item: &DrawItem| match item {
             DrawItem::Rect(c) => c.clip,
             DrawItem::Quad(c) => c.clip,
+            DrawItem::Text(_) => None,
         };
 
         // batch by texture_id
-        let mut byte_offset: u64 = 0;
         let vertex_size = std::mem::size_of::<Vertex>() as u64;
         let mut i = 0;
         while i < cmds.len() {
@@ -413,6 +421,7 @@ impl Renderer {
                             v(p4, uv4),
                         ]);
                     }
+                    DrawItem::Text(_) => continue,
                 }
             }
 
@@ -433,18 +442,18 @@ impl Renderer {
                 continue;
             }
             let buffer_cap = self.vertex_buffer.size();
-            if byte_offset + vertices.len() as u64 * vertex_size > buffer_cap {
+            if self.byte_offset + vertices.len() as u64 * vertex_size > buffer_cap {
                 break;
             }
             queue.write_buffer(
                 &self.vertex_buffer,
-                byte_offset,
+                self.byte_offset,
                 bytemuck::cast_slice(&vertices),
             );
-            let vert_start = (byte_offset / vertex_size) as u32;
+            let vert_start = (self.byte_offset / vertex_size) as u32;
             let vert_end = vert_start + vertices.len() as u32;
             pass.draw(vert_start..vert_end, 0..1);
-            byte_offset += vertices.len() as u64 * vertex_size;
+            self.byte_offset += vertices.len() as u64 * vertex_size;
         }
     }
 }
@@ -517,6 +526,7 @@ impl TextRenderer {
                 attrs,
                 glyphon::Shaping::Basic,
             );
+            buffer.shape_until_scroll(&mut self.font_system);
             buffers.push(buffer);
         }
 
