@@ -508,7 +508,6 @@ impl LuaHost {
                         String,
                     )| {
                         let color = *color_text.lock().unwrap();
-                        let stripped_text = strip_pob_escapes(&text);
                         let (ox, oy) = match *vp_text.lock().unwrap() {
                             Some([vx, vy, _, _]) => (vx as f32, vy as f32),
                             None => (0.0, 0.0),
@@ -520,7 +519,7 @@ impl LuaHost {
                                 y: y + oy,
                                 size,
                                 color,
-                                text: stripped_text,
+                                text,
                                 align,
                                 font,
                                 clip: *vp_text.lock().unwrap(),

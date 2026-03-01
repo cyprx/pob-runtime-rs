@@ -99,6 +99,9 @@ impl ApplicationHandler for App {
             view_formats: vec![],
         };
 
+        println!("scale_factor: {}", window.scale_factor());
+        println!("physical size: {:?}", window.inner_size());
+
         surface.configure(&device, &config);
         let renderer = graphics::Renderer::new(&device, format, &queue);
         let text_renderer = graphics::TextRenderer::new(&device, &queue, format);
@@ -294,7 +297,22 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        let t = std::time::Instant::now();
         self.host.callback("OnFrame").unwrap();
+        let lua_ms = t.elapsed().as_millis();
+
+        // count pending texture uploads
+        let tex_count = self.texture_queue.lock().unwrap().len();
+        let draw_count = self.draw_queue.lock().unwrap().len();
+        eprintln!(
+            "OnFrame: {}ms | draws: {} | tex: {}",
+            lua_ms, draw_count, tex_count
+        );
+
+        if lua_ms > 50 || tex_count > 0 {
+            eprintln!("OnFrame: {}ms | tex uploads queued: {}", lua_ms, tex_count);
+        }
+
         if let Some(w) = &self.window {
             w.request_redraw();
         }

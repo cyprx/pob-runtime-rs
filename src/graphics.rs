@@ -520,12 +520,21 @@ impl TextRenderer {
                 _ => glyphon::Attrs::new().family(glyphon::Family::SansSerif),
             };
 
-            buffer.set_text(
-                &mut self.font_system,
-                &cmd.text,
-                attrs,
-                glyphon::Shaping::Basic,
-            );
+            let spans = parse_color_spans(&cmd.text, cmd.color);
+            let rich: Vec<(&str, glyphon::Attrs)> = spans
+                .iter()
+                .map(|(s, c)| {
+                    let gc = glyphon::Color::rgba(
+                        (c[0] * 255.0) as u8,
+                        (c[1] * 255.0) as u8,
+                        (c[2] * 255.0) as u8,
+                        (c[3] * 255.0) as u8,
+                    );
+                    (*s, attrs.color(gc))
+                })
+                .collect();
+
+            buffer.set_rich_text(&mut self.font_system, rich, glyphon::Shaping::Basic);
             buffer.shape_until_scroll(&mut self.font_system);
             buffers.push(buffer);
         }
@@ -592,4 +601,68 @@ impl TextRenderer {
         self.renderer.render(&self.atlas, pass)?;
         Ok(())
     }
+}
+
+fn parse_color_spans<'a>(text: &'a str, default_color: [f32; 4]) -> Vec<(&'a str, [f32; 4])> {
+    let alpha = default_color[3];
+    let mut spans: Vec<(&'a str, [f32; 4])> = Vec::new();
+    let mut color = default_color;
+    let mut start = 0;
+
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'^' {
+            i += 1;
+            continue;
+        }
+
+        if i > start {
+            spans.push((&text[start..i], color));
+        }
+        i += 1;
+        if i >= bytes.len() {
+            start = i;
+            break;
+        }
+
+        if (bytes[i] == b'X' || bytes[i] == b'x') && i + 7 <= bytes.len() {
+            // ^xRRGGBB
+            if let Ok(hex) = u32::from_str_radix(&text[i + 1..i + 7], 16) {
+                color = [
+                    ((hex >> 16) & 0xFF) as f32 / 255.0,
+                    ((hex >> 8) & 0xFF) as f32 / 255.0,
+                    ((hex) & 0xFF) as f32 / 255.0,
+                    alpha,
+                ];
+            }
+            i += 7;
+        } else if bytes[i].is_ascii_digit() {
+            color = pob_digit_color(bytes[i] - b'0', alpha);
+            i += 1;
+        }
+        start = i;
+    }
+    if start < text.len() {
+        spans.push((&text[start..], color));
+    }
+
+    spans
+}
+
+fn pob_digit_color(digit: u8, alpha: f32) -> [f32; 4] {
+    let (r, g, b): (f32, f32, f32) = match digit {
+        0 => (0.0, 0.0, 0.0),    // black
+        1 => (1.0, 0.0, 0.0),    // red
+        2 => (0.0, 1.0, 0.0),    // green
+        3 => (0.0, 0.0, 1.0),    // blue
+        4 => (1.0, 1.0, 0.0),    // yellow
+        5 => (0.5, 0.5, 0.5),    // gray
+        6 => (0.5, 0.5, 0.5),    // gray
+        7 => (1.0, 1.0, 1.0),    // white
+        8 => (0.75, 0.75, 0.75), // light gray
+        9 => (0.3, 0.3, 0.3),    // dark gray
+        _ => (1.0, 1.0, 1.0),
+    };
+    [r, g, b, alpha]
 }
