@@ -7,7 +7,7 @@ use std::{
 
 use arboard::Clipboard;
 use flate2::{Compression, read::DeflateDecoder, write::DeflateEncoder};
-use image::EncodableLayout;
+use glyphon::{Buffer, FontSystem};
 use mlua::prelude::*;
 
 use crate::graphics::{CursorPos, DrawQueue, TextQueue, TextureUploadQueue};
@@ -32,6 +32,8 @@ impl LuaHost {
         let main_object: Arc<Mutex<Option<LuaRegistryKey>>> = Arc::new(Mutex::new(None));
         let mo = main_object.clone();
         let clipboard = Arc::new(Mutex::new(Clipboard::new().unwrap()));
+        let font_system = Arc::new(Mutex::new(FontSystem::new()));
+        let viewport: Arc<Mutex<Option<[u32; 4]>>> = Arc::new(Mutex::new(None));
 
         let start_time = std::time::Instant::now();
 
@@ -235,9 +237,25 @@ impl LuaHost {
                 "SetDrawLayer",
                 lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
             )?;
+
+            let vp = viewport.clone();
             g.set(
                 "SetViewport",
-                lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+                lua.create_function(move |_, args: LuaMultiValue| {
+                    let mut args = args.iter();
+                    *vp.lock().unwrap() = match args.next() {
+                        Some(LuaValue::Integer(x)) => {
+                            let x = *x as u32;
+                            let y = args.next().and_then(|v| v.as_integer()).unwrap_or(0) as u32;
+                            let w = args.next().and_then(|v| v.as_integer()).unwrap_or(0) as u32;
+                            let h = args.next().and_then(|v| v.as_integer()).unwrap_or(0) as u32;
+
+                            Some([x, y, w, h])
+                        }
+                        _ => None,
+                    };
+                    Ok(())
+                })?,
             )?;
             let ss = screen_size.clone();
             g.set(
@@ -253,6 +271,93 @@ impl LuaHost {
                 lua.create_function(move |_, ()| {
                     let v = ss.lock().unwrap();
                     Ok((v[0], v[1]))
+                })?,
+            )?;
+            g.set("GetScreenScale", lua.create_function(|_, ()| Ok(1.0f32))?)?;
+            g.set("GetAsyncCount", lua.create_function(|_, ()| Ok(0u32))?)?;
+            g.set(
+                "GetDPIScaleOverridePercent",
+                lua.create_function(|_, ()| Ok(1.0f32))?,
+            )?;
+            g.set(
+                "SetDPIScaleOverridePercent",
+                lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+            )?;
+            g.set(
+                "SetClearColor",
+                lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+            )?;
+            g.set(
+                "SetCursorPos",
+                lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+            )?;
+            g.set(
+                "ShowCursor",
+                lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+            )?;
+            g.set(
+                "ConPrintTable",
+                lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+            )?;
+            g.set(
+                "SpawnProcess",
+                lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+            )?;
+            g.set(
+                "OpenURL",
+                lua.create_function(|_, url: String| {
+                    std::process::Command::new("xdg-open")
+                        .arg(&url)
+                        .spawn()
+                        .ok();
+                    Ok(())
+                })?,
+            )?;
+            g.set(
+                "SetProfiling",
+                lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+            )?;
+            g.set("Restart", lua.create_function(|_, ()| Ok(()))?)?;
+            g.set("TakeScreenshot", lua.create_function(|_, ()| Ok(()))?)?;
+            g.set(
+                "RemoveDir",
+                lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+            )?;
+            g.set(
+                "SetWorkDir",
+                lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+            )?;
+            g.set(
+                "GetWorkDir",
+                lua.create_function(|_, ()| Ok(String::new()))?,
+            )?;
+            g.set(
+                "LaunchSubScript",
+                lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+            )?;
+            g.set(
+                "AbortSubScript",
+                lua.create_function(|_, _: LuaMultiValue| Ok(()))?,
+            )?;
+            g.set(
+                "IsSubScriptRunning",
+                lua.create_function(|_, _: LuaMultiValue| Ok(false))?,
+            )?;
+            g.set(
+                "GetCloudProvider",
+                lua.create_function(|_, _: LuaMultiValue| {
+                    Ok(LuaMultiValue::from_vec(vec![
+                        LuaValue::Nil,
+                        LuaValue::Nil,
+                        LuaValue::Nil,
+                    ]))
+                })?,
+            )?;
+
+            g.set(
+                "Exit",
+                lua.create_function(|_, ()| -> LuaResult<()> {
+                    std::process::exit(0);
                 })?,
             )?;
 
@@ -308,6 +413,7 @@ impl LuaHost {
                             tcr.unwrap_or(0.0),
                             tcb.unwrap_or(0.0),
                         ];
+                        let clip = *viewport.lock().unwrap();
                         dq.lock().unwrap().push(crate::graphics::DrawCmd {
                             x,
                             y,
@@ -316,15 +422,66 @@ impl LuaHost {
                             color,
                             texture_id,
                             uv,
+                            clip,
                         });
                         Ok(())
                     },
                 )?,
             )?;
 
+            let fs = font_system.clone();
             g.set(
                 "DrawStringWidth",
-                lua.create_function(|_, _: LuaMultiValue| Ok(1280u32))?,
+                lua.create_function(move |_, (size, _font, text): (f32, String, String)| {
+                    let mut fs = fs.lock().unwrap();
+                    let mut buf = Buffer::new(&mut fs, glyphon::Metrics::new(size, size * 1.2));
+                    buf.set_size(&mut fs, f32::MAX, f32::MAX);
+                    let stripped = strip_pob_escapes(&text);
+                    buf.set_text(
+                        &mut fs,
+                        &stripped,
+                        glyphon::Attrs::new(),
+                        glyphon::Shaping::Basic,
+                    );
+                    buf.shape_until_scroll(&mut fs);
+                    let width = buf.layout_runs().map(|r| r.line_w).fold(0.0f32, f32::max);
+                    Ok(width as u32)
+                })?,
+            )?;
+
+            let fs = font_system.clone();
+            g.set(
+                "DrawStringCursorIndex",
+                lua.create_function(
+                    move |_,
+                          (size, _font, text, cursor_x, _cursor_y): (
+                        f32,
+                        String,
+                        String,
+                        f32,
+                        f32,
+                    )| {
+                        let mut fs = fs.lock().unwrap();
+                        let mut buf = Buffer::new(&mut fs, glyphon::Metrics::new(size, size * 1.2));
+                        buf.set_size(&mut fs, f32::MAX, f32::MAX);
+                        let stripped = strip_pob_escapes(&text);
+                        buf.set_text(
+                            &mut fs,
+                            &stripped,
+                            glyphon::Attrs::new(),
+                            glyphon::Shaping::Basic,
+                        );
+                        buf.shape_until_scroll(&mut fs);
+                        for run in buf.layout_runs() {
+                            for glyph in run.glyphs.iter() {
+                                if cursor_x < glyph.x + glyph.w * 0.5 {
+                                    return Ok(glyph.start as i64);
+                                }
+                            }
+                        }
+                        Ok(stripped.len() as i64)
+                    },
+                )?,
             )?;
 
             let tq = text_queue.clone();

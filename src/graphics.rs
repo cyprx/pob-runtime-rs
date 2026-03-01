@@ -54,6 +54,7 @@ pub struct DrawCmd {
     pub color: [f32; 4],
     pub texture_id: u32,
     pub uv: [f32; 4], // [tcLeft, tcTop, tcRight, tcBottom]
+    pub clip: Option<[u32; 4]>,
 }
 
 pub type DrawQueue = Arc<Mutex<Vec<DrawCmd>>>;
@@ -329,7 +330,7 @@ impl Renderer {
         while i < cmds.len() {
             let tid = cmds[i].texture_id;
             let start = i;
-            while i < cmds.len() && cmds[i].texture_id == tid {
+            while i < cmds.len() && cmds[i].texture_id == tid && cmds[i].clip == cmds[start].clip {
                 i += 1;
             }
             let mut vertices: Vec<Vertex> = Vec::new();
@@ -371,6 +372,14 @@ impl Renderer {
                 .textures
                 .get(&tid)
                 .unwrap_or_else(|| self.textures.get(&0).unwrap());
+            match cmds[start].clip {
+                Some([cx, cy, cw, ch]) => {
+                    pass.set_scissor_rect(cx, cy, cw.max(1), ch.max(1));
+                }
+                None => {
+                    pass.set_scissor_rect(0, 0, screen_size.0, screen_size.1);
+                }
+            }
             pass.set_bind_group(1, bg, &[]);
             if vertices.is_empty() {
                 continue;
